@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PropertyIQ - AI Location Analysis</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .container {
+      background: white;
+      padding: 40px;
+      border-radius: 20px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      max-width: 550px;
+      width: 100%;
+    }
+    h1 {
+      text-align: center;
+      color: #667eea;
+      margin-bottom: 10px;
+      font-size: 36px;
+      font-weight: 700;
+    }
+    .subtitle {
+      text-align: center;
+      color: #666;
+      margin-bottom: 30px;
+      font-size: 14px;
+    }
+    label {
+      display: block;
+      color: #333;
+      font-weight: 600;
+      margin-bottom: 8px;
+      font-size: 14px;
+    }
+    input {
+      width: 100%;
+      padding: 15px;
+      border: 2px solid #e0e0e0;
+      border-radius: 10px;
+      font-size: 16px;
+      margin-bottom: 20px;
+      transition: border 0.3s;
+    }
+    input:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+    button {
+      width: 100%;
+      padding: 16px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+      border-radius: 10px;
+      font-size: 18px;
+      font-weight: bold;
+      cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.2s;
+      box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+    }
+    button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+    }
+    button:active {
+      transform: translateY(0);
+    }
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+    .result {
+      margin-top: 25px;
+      padding: 20px;
+      border-radius: 10px;
+      display: none;
+    }
+    .success {
+      background: #d4edda;
+      border: 2px solid #c3e6cb;
+      color: #155724;
+      display: block;
+    }
+    .error {
+      background: #f8d7da;
+      border: 2px solid #f5c6cb;
+      color: #721c24;
+      display: block;
+    }
+    .loading {
+      background: #e7f3ff;
+      border: 2px solid #b8daff;
+      color: #004085;
+      display: block;
+      text-align: center;
+    }
+    .result h3 {
+      margin-bottom: 10px;
+      font-size: 20px;
+    }
+    .result p {
+      margin: 8px 0;
+      line-height: 1.6;
+    }
+    .result a {
+      display: inline-block;
+      margin-top: 15px;
+      padding: 12px 24px;
+      background: #667eea;
+      color: white;
+      text-decoration: none;
+      border-radius: 8px;
+      font-weight: bold;
+      transition: background 0.3s;
+    }
+    .result a:hover {
+      background: #5568d3;
+    }
+    .spinner {
+      border: 3px solid #f3f3f3;
+      border-top: 3px solid #667eea;
+      border-radius: 50%;
+      width: 40px;
+      height: 40px;
+      animation: spin 1s linear infinite;
+      margin: 0 auto;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>PropertyIQ</h1>
+    <p class="subtitle">AI-Powered Business Location Analysis</p>
+    
+    <label for="query">Enter Business Location:</label>
+    <input 
+      type="text" 
+      id="query" 
+      placeholder="e.g., Times Square, New York"
+      value="Times Square, New York"
+    >
+    
+    <button onclick="generateReport()" id="btn">
+      🚀 Generate Professional Report
+    </button>
+    
+    <div id="result" class="result"></div>
+  </div>
+  
+  <script>
+    async function generateReport() {
+      const query = document.getElementById('query').value.trim();
+      const btn = document.getElementById('btn');
+      const result = document.getElementById('result');
+      
+      if (!query) {
+        result.className = 'result error';
+        result.innerHTML = '<h3>❌ Error</h3><p>Please enter a location</p>';
+        return;
+      }
+      
+      btn.disabled = true;
+      btn.textContent = 'Generating Report...';
+      result.className = 'result loading';
+      result.innerHTML = `
+        <div class="spinner"></div>
+        <p style="margin-top: 15px;">⏳ Analyzing location data...</p>
+        <p style="font-size: 12px; color: #666; margin-top: 5px;">This takes about 30 seconds</p>
+      `;
+      
+      try {
+        const response = await fetch('http://localhost:5002/api/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: query })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+          const pdfUrl = 'http://localhost:5002' + data.pdf_url;
+          
+          result.className = 'result success';
+          result.innerHTML = `
+            <h3>✅ Report Generated Successfully!</h3>
+            <p><strong>📍 Location:</strong> ${query}</p>
+            <p><strong>⏱️ Generation Time:</strong> ${data.generation_time}</p>
+            <p><strong>📄 Filename:</strong> ${data.filename}</p>
+            <a href="${pdfUrl}" target="_blank" download="${data.filename}">
+              📥 Download PDF Report
+            </a>
+          `;
+          
+          // Auto-open PDF in new tab
+          setTimeout(() => {
+            window.open(pdfUrl, '_blank');
+          }, 500);
+          
+        } else {
+          throw new Error(data.error || 'Report generation failed');
+        }
+        
+      } catch (error) {
+        result.className = 'result error';
+        result.innerHTML = `
+          <h3>❌ Generation Error</h3>
+          <p>${error.message}</p>
+          <p style="font-size: 12px; margin-top: 10px;">Please try again or contact support.</p>
+        `;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '🚀 Generate Professional Report';
+      }
+    }
+    
+    // Allow Enter key to submit
+    document.getElementById('query').addEventListener('keypress', function(e) {
+      if (e.key === 'Enter') {
+        generateReport();
+      }
+    });
+  </script>
+</body>
+</html>

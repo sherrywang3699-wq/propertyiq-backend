@@ -1,0 +1,127 @@
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const Anthropic = require('@anthropic-ai/sdk');
+const PDFDocument = require('pdfkit');
+const fs = require('fs');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use('/pdfs', express.static('pdfs'));
+
+if (!fs.existsSync('pdfs')) fs.mkdirSync('pdfs');
+
+const client = new Anthropic({ 
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  timeout: 60000 // 60 second timeout
+});
+
+console.log('\n✅ PropertyIQ Backend');
+console.log('API Key:', process.env.ANTHROPIC_API_KEY ? 'OK' : 'MISSING');
+
+app.post('/api/generate', async (req, res) => {
+  const startTime = Date.now();
+  console.log('\n📝 New request:', req.body.query);
+  
+  try {
+    // Call Claude with timeout protection
+    console.log('⏱️  Calling Claude API (max 45 seconds)...');
+    
+    const claudePromise = client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2048,
+      messages: [{ 
+        role: 'user', 
+        content: `Write a concise 600-word business location report for: ${req.body.query}
+
+Include:
+- Location overview (100 words)
+- Market potential (150 words)
+- Competition assessment (150 words)
+- Financial estimate (100 words)
+- Key risks (50 words)
+- Go/No-Go recommendation (50 words)
+
+Be direct and specific.` 
+      }]
+    });
+    
+    // Add timeout wrapper
+    const msg = await Promise.race([
+      claudePromise,
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Claude API timeout after 45s')), 45000)
+      )
+    ]);
+    
+    const text = msg.content[0].text;
+    const claudeTime = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`✅ Report generated in ${claudeTime}s (${text.length} chars)`);
+    
+    // Create PDF
+    console.log('📄 Creating PDF...');
+    const pdfStart = Date.now();
+    const name = `Report_${Date.now()}.pdf`;
+    const doc = new PDFDocument({ margin: 50 });
+    const stream = fs.createWriteStream(`pdfs/${name}`);
+    
+    doc.pipe(stream);
+    
+    // Simple clean layout
+    doc.fontSize(18).font('Helvetica-Bold')
+       .text('PropertyIQ Analysis', { align: 'center' });
+    doc.moveDown(0.5);
+    
+    doc.fontSize(11).font('Helvetica')
+       .text(req.body.query, { align: 'center' });
+    doc.moveDown(0.5);
+    
+    doc.fontSize(9)
+       .text(new Date().toLocaleDateString(), { align: 'center' });
+    doc.moveDown(2);
+    
+    // Content
+    doc.fontSize(9).font('Helvetica')
+       .text(text, { align: 'justify', lineGap: 2 });
+    
+    doc.end();
+    
+    await new Promise(resolve => stream.on('finish', resolve));
+    
+    const pdfTime = ((Date.now() - pdfStart) / 1000).toFixed(1);
+    const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+    
+    console.log(`✅ PDF created in ${pdfTime}s`);
+    console.log(`✅ Total: ${totalTime}s\n`);
+    
+    res.json({
+      success: true,
+      pdf_url: `/pdfs/${name}`,
+      filename: name,
+      generation_time: totalTime + 's'
+    });
+    
+  } catch (err) {
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.error(`❌ Error after ${elapsed}s:`, err.message);
+    console.error('Full error:', err);
+    
+    res.status(500).json({ 
+      error: err.message,
+      time_elapsed: elapsed + 's'
+    });
+  }
+});
+
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok',
+    api_key_present: !!process.env.ANTHROPIC_API_KEY
+  });
+});
+
+const PORT = 5002;
+app.listen(PORT, () => {
+  console.log(`\n🚀 Listening on http://localhost:${PORT}\n`);
+});

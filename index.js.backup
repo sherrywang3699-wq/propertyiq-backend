@@ -1,0 +1,338 @@
+/**
+ * PropertyIQ Backend v3.0 - Professional Edition
+ * NO EMAIL (removed resend dependency)
+ */
+
+const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
+const Anthropic = require('@anthropic-ai/sdk');
+const PDFDocument = require('pdfkit');
+const fs = require('fs');
+const path = require('path');
+require('dotenv').config();
+
+const app = express();
+const PORT = process.env.PORT || 5002;
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use('/pdfs', express.static(path.join(__dirname, 'pdfs')));
+
+// Ensure directories
+if (!fs.existsSync('./pdfs')) fs.mkdirSync('./pdfs');
+
+// Anthropic client
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY
+});
+
+console.log('🚀 PropertyIQ Backend Starting...');
+console.log(`✅ Anthropic API: ${process.env.ANTHROPIC_API_KEY ? 'OK' : 'MISSING'}`);
+
+// ============================================
+// GEOCODING
+// ============================================
+async function geocodeLocation(address) {
+  try {
+    console.log(`📍 Geocoding: ${address}`);
+    
+    const url = `https://nominatim.openstreetmap.org/search`;
+    const response = await axios.get(url, {
+      params: {
+        q: address,
+        format: 'json',
+        limit: 1,
+        addressdetails: 1
+      },
+      headers: {
+        'User-Agent': 'PropertyIQ/3.0'
+      },
+      timeout: 10000
+    });
+    
+    if (!response.data || response.data.length === 0) {
+      throw new Error('Location not found');
+    }
+    
+    const result = response.data[0];
+    
+    return {
+      lat: parseFloat(result.lat),
+      lng: parseFloat(result.lon),
+      formatted_address: result.display_name,
+      city: result.address.city || result.address.town,
+      state: result.address.state,
+      country: result.address.country
+    };
+    
+  } catch (error) {
+    console.error('❌ Geocoding error:', error.message);
+    throw error;
+  }
+}
+
+// ============================================
+// GET COMPETITORS
+// ============================================
+async function getCompetitors(lat, lng, businessType) {
+  try {
+    console.log(`🔍 Finding competitors...`);
+    
+    const typeMap = {
+      'restaurant': 'restaurant',
+      'cafe': 'cafe',
+      'retail': 'shop',
+      'salon': 'hairdresser'
+    };
+    
+    const amenity = typeMap[businessType?.toLowerCase()] || 'restaurant';
+    
+    const query = `
+      [out:json][timeout:25];
+      (
+        node["amenity"="${amenity}"](around:2000,${lat},${lng});
+        way["amenity"="${amenity}"](around:2000,${lat},${lng});
+      );
+      out body;
+    `;
+    
+    const response = await axios.post(
+      'https://overpass-api.de/api/interpreter',
+      query,
+      {
+        headers: { 'Content-Type': 'text/plain' },
+        timeout: 30000
+      }
+    );
+    
+    const competitors = response.data.elements
+      .filter(el => el.tags && el.tags.name)
+      .map(el => ({
+        name: el.tags.name,
+        type: el.tags.amenity || el.tags.shop
+      }))
+      .slice(0, 25);
+    
+    console.log(`✅ Found ${competitors.length} competitors`);
+    return competitors;
+    
+  } catch (error) {
+    console.error('⚠️  Competitor search error:', error.message);
+    return [];
+  }
+}
+
+// ============================================
+// GENERATE REPORT
+// ============================================
+async function generateReport(location, competitors, businessType) {
+  try {
+    console.log('📝 Generating report with Claude...');
+    
+    const prompt = `You are a professional business analyst. Generate a comprehensive 20-25 page business location report.
+
+**LOCATION:**
+${location.formatted_address}
+Coordinates: ${location.lat}, ${location.lng}
+
+**BUSINESS TYPE:** ${businessType || 'restaurant'}
+
+**COMPETITORS:** ${competitors.length} found within 2km
+
+**REQUIREMENTS:**
+- 5500-6500 words
+- Professional analysis
+- Property value predictions
+- Revenue projections
+- Risk assessment
+
+**STRUCTURE:**
+
+# Executive Summary
+[500 words - Key findings, recommendation, ROI]
+
+# Location Analysis
+[600 words - Demographics, accessibility, trends]
+
+# Market Analysis  
+[700 words - Target customers, market size, growth]
+
+# Competitive Landscape
+[800 words - ${competitors.length} competitors analysis, market gaps]
+
+# Property Predictions
+[700 words - Current value estimates, 1/3/5 year predictions]
+
+# Financial Projections
+[900 words - Revenue scenarios, cost breakdown, break-even]
+
+# Risk Assessment
+[600 words - Market/competition/location risks, mitigation]
+
+# Marketing Strategy
+[600 words - Customer acquisition, launch strategy]
+
+# Implementation Roadmap
+[600 words - Month-by-month plan, milestones]
+
+# Recommendations
+[500 words - Final go/no-go decision]
+
+Generate complete report in Markdown:`;
+
+    const message = await anthropic.messages.create({
+      model: 'claude-opus-4-20250514',
+      max_tokens: 16000,
+      temperature: 0.7,
+      messages: [{ role: 'user', content: prompt }]
+    });
+    
+    const report = message.content[0].text;
+    console.log(`✅ Report generated: ${report.split(/\s+/).length} words`);
+    
+    return report;
+    
+  } catch (error) {
+    console.error('❌ Report generation error:', error);
+    throw error;
+  }
+}
+
+// ============================================
+// GENERATE PDF
+// ============================================
+async function generatePDF(markdown, filename) {
+  return new Promise((resolve, reject) => {
+    try {
+      console.log('📄 Generating PDF...');
+      
+      const filepath = path.join(__dirname, 'pdfs', filename);
+      const doc = new PDFDocument({
+        size: 'LETTER',
+        margins: { top: 50, bottom: 50, left: 60, right: 60 }
+      });
+      
+      const stream = fs.createWriteStream(filepath);
+      doc.pipe(stream);
+      
+      // Title page
+      doc.fontSize(28).font('Helvetica-Bold')
+         .text('PropertyIQ', { align: 'center' });
+      doc.moveDown();
+      doc.fontSize(18).font('Helvetica')
+         .text('Business Location Analysis', { align: 'center' });
+      doc.moveDown(3);
+      doc.fontSize(12).text(`Generated: ${new Date().toLocaleDateString()}`, { align: 'center' });
+      
+      doc.addPage();
+      
+      // Content
+      const lines = markdown.split('\n');
+      
+      for (const line of lines) {
+        if (doc.y > doc.page.height - 100) {
+          doc.addPage();
+        }
+        
+        if (line.startsWith('# ')) {
+          doc.addPage();
+          doc.fontSize(20).font('Helvetica-Bold')
+             .text(line.replace('# ', ''));
+          doc.moveDown();
+        } else if (line.startsWith('## ')) {
+          doc.fontSize(14).font('Helvetica-Bold')
+             .text(line.replace('## ', ''));
+          doc.moveDown(0.5);
+        } else if (line.startsWith('- ')) {
+          doc.fontSize(11).font('Helvetica')
+             .text('• ' + line.replace('- ', ''), { indent: 20 });
+        } else if (line.trim()) {
+          doc.fontSize(11).font('Helvetica')
+             .text(line.replace(/\*\*/g, ''), { align: 'justify' });
+          doc.moveDown(0.4);
+        }
+      }
+      
+      doc.end();
+      
+      stream.on('finish', () => {
+        console.log('✅ PDF generated');
+        resolve(filepath);
+      });
+      
+      stream.on('error', reject);
+      
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+// ============================================
+// MAIN ENDPOINT
+// ============================================
+app.post('/api/analyze', async (req, res) => {
+  try {
+    const { query, businessType } = req.body;
+    
+    if (!query) {
+      return res.status(400).json({ error: 'Query required' });
+    }
+    
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`NEW REQUEST: ${query}`);
+    console.log(`${'='.repeat(60)}\n`);
+    
+    // Step 1: Geocode
+    const location = await geocodeLocation(query);
+    
+    // Step 2: Get competitors
+    const competitors = await getCompetitors(
+      location.lat, 
+      location.lng, 
+      businessType || 'restaurant'
+    );
+    
+    // Step 3: Generate report
+    const report = await generateReport(location, competitors, businessType);
+    
+    // Step 4: Generate PDF
+    const filename = `PropertyIQ_Report_${Date.now()}.pdf`;
+    await generatePDF(report, filename);
+    
+    console.log(`\n✅ COMPLETE: ${filename}\n`);
+    
+    res.json({
+      success: true,
+      report: report,
+      pdf_url: `/pdfs/${filename}`,
+      pdf_filename: filename,
+      location: location.formatted_address,
+      competitors_found: competitors.length,
+      word_count: report.split(/\s+/).length
+    });
+    
+  } catch (error) {
+    console.error('\n❌ ERROR:', error.message, '\n');
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    version: '3.0',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Start
+app.listen(PORT, () => {
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`🚀 PropertyIQ Backend v3.0`);
+  console.log(`📍 http://localhost:${PORT}`);
+  console.log(`${'='.repeat(60)}\n`);
+});

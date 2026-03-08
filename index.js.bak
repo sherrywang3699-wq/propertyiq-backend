@@ -1,0 +1,803 @@
+const express = require('express');
+const cors = require('cors');
+const Stripe = require('stripe');
+const axios = require('axios');
+const Anthropic = require('@anthropic-ai/sdk').default;
+const PDFDocument = require('pdfkit');
+const fs = require('fs');
+const path = require('path');
+require('dotenv').config();
+
+const app = express();
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+app.use(cors());
+app.use(express.json());
+
+const PRICING = {
+  residential: { USD: 999 },
+  commercial: { USD: 2999 }
+};
+
+const GOOGLE_MAPS_KEY = 'AIzaSyCy8dLaE-dKx_sp-6AZaiHgSLAboMyTd1w';
+const usedPromoEmails = new Set();
+
+function detectLanguage(text) {
+  return /[\u4e00-\u9fa5]/.test(text) ? 'zh' : 'en';
+}
+
+async function intelligentUnderstanding(query) {
+  try {
+    const message = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 300,
+      temperature: 0,
+      messages: [{ role: 'user', content: `分析查询："${query}"\n\n返回JSON格式：\n{"understood":true/false,"location":"具体地点（英文）","business":"业态类型","intent":"analysis/recommendation"}\n\n只返回JSON，不要其他内容。` }],
+    });
+    return JSON.parse(message.content[0].text.trim().replace(/```json|```/g, '').trim());
+  } catch (error) {
+    return { understood: false };
+  }
+}
+
+async function getGoogleMapsInfo(location) {
+  try {
+    const response = await axios.get('https://maps.googleapis.com/maps/api/place/textsearch/json', {
+      params: { query: location, key: GOOGLE_MAPS_KEY }, timeout: 10000
+    });
+    if (response.data.results?.[0]) {
+      const place = response.data.results[0];
+      const details = await axios.get('https://maps.googleapis.com/maps/api/place/details/json', {
+        params: { place_id: place.place_id, fields: 'formatted_address,geometry', key: GOOGLE_MAPS_KEY }, timeout: 10000
+      });
+      return {
+        address: details.data.result.formatted_address,
+        lat: details.data.result.geometry.location.lat,
+        lng: details.data.result.geometry.location.lng
+      };
+    }
+  } catch (error) {}
+  return { address: location, lat: 40.7589, lng: -73.9851 };
+}
+
+async function getNearbyPlaces(lat, lng) {
+  try {
+    const response = await axios.get('https://maps.googleapis.com/maps/api/place/nearbysearch/json', {
+      params: { location: `${lat},${lng}`, radius: 2000, type: 'establishment', key: GOOGLE_MAPS_KEY }, timeout: 10000
+    });
+    return response.data.results?.slice(0, 12) || [];
+  } catch (error) {
+    return [];
+  }
+}
+
+async function generatePDF(reportData, reportText) {
+  return new Promise((resolve, reject) => {
+    try {
+      const fileName = `PropertyIQ-${reportData.reportId}.pdf`;
+      const filePath = path.join('/tmp', fileName);
+      const doc = new PDFDocument({ margin: 50, size: 'A4' });
+      const writeStream = fs.createWriteStream(filePath);
+      
+      doc.pipe(writeStream);
+      
+      // 封面
+      doc.fontSize(28).fillColor('#0ea5e9').text('PropertyIQ', { align: 'center' });
+      doc.fontSize(16).fillColor('#666').text('Professional Property Analysis Report', { align: 'center' });
+      doc.moveDown(2);
+      
+      // 报告信息盒子
+      doc.fontSize(11).fillColor('#000');
+      const boxY = doc.y;
+      doc.rect(50, boxY, 495, 100).fillAndStroke('#f0f9ff', '#0ea5e9');
+      doc.fillColor('#000').text(`Report ID: ${reportData.reportId}`, 70, boxY + 20);
+      doc.text(`Address: ${reportData.address}`, 70, boxY + 40);
+      doc.text(`Analysis Date: ${reportData.date}`, 70, boxY + 60);
+      doc.text(`Report Type: ${reportData.type || 'Commercial'}`, 70, boxY + 80);
+      
+      doc.moveDown(3);
+      
+      // 内容
+      doc.fontSize(10).fillColor('#000');
+      const lines = reportText.split('\n');
+      
+      for (let line of lines) {
+        if (doc.y > 720) doc.addPage();
+        
+        // 标题格式化
+        if (line.startsWith('# ')) {
+          doc.moveDown().fontSize(18).fillColor('#0ea5e9').text(line.replace('# ', ''), { underline: true });
+          doc.fontSize(10).fillColor('#000').moveDown(0.5);
+        } else if (line.startsWith('## ')) {
+          doc.moveDown().fontSize(14).fillColor('#2563eb').text(line.replace('## ', ''));
+          doc.fontSize(10).fillColor('#000').moveDown(0.3);
+        } else if (line.startsWith('### ')) {
+          doc.moveDown(0.5).fontSize(12).fillColor('#000').text(line.replace('### ', ''), { bold: true });
+          doc.fontSize(10).moveDown(0.2);
+        } else if (line.trim()) {
+          doc.text(line, { align: 'left', lineGap: 2 });
+        } else {
+          doc.moveDown(0.3);
+        }
+      }
+      
+      // 页脚
+      const pageCount = doc.bufferedPageRange().count;
+      for (let i = 0; i < pageCount; i++) {
+        doc.switchToPage(i);
+        doc.fontSize(8).fillColor('#999').text(
+          `Page ${i + 1} of ${pageCount} | © 2026 PropertyIQ - propertyiq.space`,
+          50, 770, { align: 'center' }
+        );
+      }
+      
+      doc.end();
+      writeStream.on('finish', () => resolve(filePath));
+      writeStream.on('error', reject);
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+async function sendReportEmail(email, reportData, reportText) {
+    console.log('⚠️ Resend not configured');
+    return false;
+  }
+
+  try {
+    console.log('📧 Generating PDF...');
+    const pdfPath = await generatePDF(reportData, reportText);
+    const pdfBuffer = fs.readFileSync(pdfPath);
+    const pdfBase64 = pdfBuffer.toString('base64');
+    
+    console.log('📧 Sending to:', email);
+    
+      from: 'PropertyIQ <report@propertyiq.space>',
+      to: [email],
+      subject: `✅ Your PropertyIQ Professional Report - ${reportData.reportId}`,
+      html: `
+<html><body style="font-family:Arial,sans-serif;padding:20px;background:#f5f5f5;">
+<div style="max-width:600px;margin:0 auto;background:white;border-radius:12px;overflow:hidden;box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+<div style="background:linear-gradient(135deg,#06b6d4,#2563eb);color:white;padding:40px 20px;text-align:center;">
+<h1 style="margin:0;font-size:32px;">✅ Your Report is Ready!</h1>
+<p style="margin:10px 0 0 0;font-size:16px;">Professional Property Analysis</p>
+</div>
+<div style="padding:30px;">
+<div style="background:#f0f9ff;border-left:4px solid #0ea5e9;padding:20px;margin:20px 0;">
+<p style="margin:5px 0;"><strong>Report ID:</strong> ${reportData.reportId}</p>
+<p style="margin:5px 0;"><strong>Address:</strong> ${reportData.address}</p>
+<p style="margin:5px 0;"><strong>Date:</strong> ${reportData.date}</p>
+</div>
+<div style="background:#dcfce7;padding:20px;margin:20px 0;border-radius:8px;">
+<p style="margin:0;font-weight:600;color:#166534;">📄 Your complete professional report (20-25 pages) is attached as PDF!</p>
+</div>
+<p style="color:#666;line-height:1.6;">Thank you for using PropertyIQ! Your detailed property analysis report is attached.</p>
+<div style="margin-top:30px;padding-top:20px;border-top:1px solid #e5e7eb;">
+<p style="color:#999;font-size:12px;text-align:center;">Questions? <a href="mailto:support@propertyiq.space" style="color:#0ea5e9;">support@propertyiq.space</a></p>
+<p style="color:#999;font-size:12px;text-align:center;">© 2026 PropertyIQ - AI-Powered Global Property Intelligence</p>
+</div></div></div></body></html>`,
+      attachments: [{ filename: `PropertyIQ-${reportData.reportId}.pdf`, content: pdfBase64 }],
+    });
+
+    try { fs.unlinkSync(pdfPath); } catch (err) {}
+
+    if (error) {
+      console.error('❌ Email error:', error);
+      return false;
+    }
+
+    console.log('✅ Email sent!');
+    return true;
+  } catch (error) {
+    console.error('❌ Email failed:', error);
+    return false;
+  }
+}
+
+app.post('/api/verify-location', async (req, res) => {
+  try {
+    const { address } = req.body;
+    if (!address) return res.json({ valid: false, suggestion: 'Please enter a location or business question' });
+    
+    const understanding = await intelligentUnderstanding(address);
+    
+    if (!understanding.understood) {
+      return res.json({ valid: false, suggestion: 'Please be more specific about the location or business type' });
+    }
+    
+    res.json({ valid: true, address: understanding.location, coordinates: { lat: 40, lng: -73 } });
+  } catch (error) {
+    res.json({ valid: false, suggestion: 'Verification error. Please try again.' });
+  }
+});
+
+app.post('/api/create-checkout', async (req, res) => {
+  try {
+    const { type, address, email, promoCode } = req.body;
+    
+    console.log('🎫 Promo:', promoCode);
+    
+    if (promoCode && promoCode.toUpperCase() === 'PRODUCTHUNT') {
+      if (email) {
+        const key = `${email.toLowerCase()}_PRODUCTHUNT`;
+        if (usedPromoEmails.has(key)) {
+          return res.status(400).json({ error: 'This promo code has already been used with this email' });
+        }
+        usedPromoEmails.add(key);
+      }
+      
+      return res.json({ 
+        url: `https://propertyiq-ai.vercel.app/?success=true&session_id=free_${Date.now()}&address=${encodeURIComponent(address)}&type=${type}&email=${encodeURIComponent(email || '')}`
+      });
+    }
+    
+    const sessionConfig = {
+      payment_method_types: ['card'],
+      customer_email: email || undefined,
+      line_items: [{ 
+        price_data: { 
+          currency: 'usd', 
+          product_data: { 
+            name: `PropertyIQ ${type === 'commercial' ? 'Commercial' : 'Residential'} Analysis`, 
+            description: address 
+          }, 
+          unit_amount: PRICING[type].USD 
+        }, 
+        quantity: 1 
+      }],
+      mode: 'payment',
+      success_url: `https://propertyiq-ai.vercel.app/?success=true&session_id={CHECKOUT_SESSION_ID}&address=${encodeURIComponent(address)}&type=${type}&email=${encodeURIComponent(email || '')}`,
+      cancel_url: `https://propertyiq-ai.vercel.app/`,
+      metadata: { address, type, email: email || 'none' }
+    };
+
+    const session = await stripe.checkout.sessions.create(sessionConfig);
+    res.json({ url: session.url });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/generate-report', async (req, res) => {
+  try {
+    const { address, type, sessionId, email } = req.body;
+    
+    console.log('📝 Generating:', address);
+    
+    if (!sessionId || sessionId.startsWith('free_')) {
+      console.log('🎉 Free report');
+    }
+    
+    const language = detectLanguage(address);
+    const understanding = await intelligentUnderstanding(address);
+    
+    if (!understanding.understood || !understanding.location) {
+      return res.status(400).json({ error: 'Cannot understand location. Please be more specific.' });
+    }
+    
+    const location = await getGoogleMapsInfo(understanding.location);
+    const currentDate = new Date().toLocaleDateString(language === 'zh' ? 'zh-CN' : 'en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+    let nearbyContext = '';
+    if (type === 'commercial') {
+      const competitors = await getNearbyPlaces(location.lat, location.lng);
+      if (competitors.length > 0) {
+        nearbyContext = `\n\n【真实竞争数据 - Google Maps实时】\n${competitors.map((p, i) => 
+          `${i+1}. ${p.name}\n   评分：⭐${p.rating || 'N/A'}/5（${p.user_ratings_total || 0}条评价）\n   地址：${p.vicinity || '未知'}\n   类型：${p.types?.[0] || '未知'}`
+        ).join('\n\n')}`;
+      }
+    }
+
+    const prompt = language === 'zh' ? 
+`你是麦肯锡级别的顶级商业地产咨询顾问。客户支付了$29.99，期望收到超值的专业报告。
+
+**项目信息：**
+地点：${location.address}
+业态：${understanding.business || '商业'}
+分析日期：${currentDate}（2026年3月6日）
+${nearbyContext}
+
+**任务要求：**
+生成一份**20-25页的顶级专业报告**（总字数5500-6500字）
+
+**质量标准：**
+1. 每个章节必须充分展开，不能简略
+2. 提供具体数字，不要泛泛而谈
+3. 财务预测要详细（月度breakdown）
+4. 竞争分析要深入（SWOT）
+5. 风险评估要全面
+6. 行动计划要可执行
+
+**数据要求：**
+- 所有经济/人口数据标注"2026年Q1"
+- 竞争数据使用上面提供的真实Google Maps数据
+- 财务预测基于2026-2028年
+- 成本数据使用2026年市场价格
+
+**报告结构（严格按照此格式）：**
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ${location.address} 商业选址专业分析报告
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+**报告编号：** PQ-COMM-${Date.now()}
+**分析日期：** ${currentDate}
+**数据时效：** 2026年第一季度
+**业态类型：** ${understanding.business || '商业'}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## 第一章：执行摘要 Executive Summary
+**（目标：500-600字）**
+
+### 1.1 综合评估
+
+**PropertyIQ评分系统：**
+- 总体得分：XX/100分
+  - 区位优势：XX/20分（理由：...）
+  - 市场需求：XX/20分（理由：...）
+  - 竞争环境：XX/20分（理由：...）
+  - 财务可行性：XX/20分（理由：...）
+  - 风险水平：XX/20分（理由：...）
+
+### 1.2 投资建议
+
+【明确建议：强烈推荐/推荐/谨慎考虑/不推荐】
+
+**理由（详细说明）：**
+1. ...
+2. ...
+3. ...
+
+### 1.3 核心发现
+
+**五大关键发现：**
+1. 【发现1】（详细阐述）
+2. 【发现2】（详细阐述）
+3. 【发现3】（详细阐述）
+4. 【发现4】（详细阐述）
+5. 【发现5】（详细阐述）
+
+### 1.4 关键财务指标
+
+- 预期首年ROI：XX.X%
+- 投资回本期：XX-XX个月
+- 月均净利润预测：$XX,XXX
+- 3年累计收益：$XXX,XXX
+- 现金流转正时间：第X个月
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## 第二章：区域宏观经济分析
+**（目标：800-900字，2026年Q1数据）**
+
+### 2.1 城市/区域经济概况
+
+**2026年Q1关键经济指标：**
+- 2025年GDP：$XX.X billion
+- 2026年Q1同比增长：+X.X%
+- 失业率（2026年3月）：X.X%
+- 通货膨胀率（2026年Q1）：X.X%
+- 人均GDP：$XX,XXX
+- 经济增长驱动因素：【详细分析】
+
+【深入分析每个指标对商业的影响，不少于200字】
+
+### 2.2 房地产市场动态
+
+**商业地产数据（2026年Q1）：**
+- 商业空置率：X.X%（同比变化：XX%）
+- 平均租金：$XX.XX/平方英尺/月
+- 租金趋势：【上涨/稳定/下降】（XX%变化）
+- 地产交易量：XXX笔（同比：XX%）
+- 未来12个月预测：【详细分析】
+
+【深入分析租金趋势、供需关系、开发商动态，不少于250字】
+
+### 2.3 商业环境评估
+
+**2026年Q1商业活跃度：**
+- 新开业企业：XXX家
+- 企业存活率（3年）：XX%
+- 商业贷款批准率：XX%
+- 商业活跃度指数：XX/100
+- 政府支持政策：【详细列举】
+
+【分析商业氛围、政策环境，不少于200字】
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## 第三章：人口与消费力深度分析
+**（目标：1000-1200字）**
+
+### 3.1 人口统计详细数据（2026年）
+
+**总体人口结构：**
+- 常住人口：XX,XXX人（增长率：+X.X%/年）
+- 人口密度：X,XXX人/km²
+- 家庭数量：XX,XXX户
+- 平均家庭规模：X.X人
+
+**年龄分层（详细）：**
+- 18-24岁：XX.X%（X,XXX人）- 【消费特征】
+- 25-34岁：XX.X%（X,XXX人）- 【消费特征】
+- 35-44岁：XX.X%（X,XXX人）- 【消费特征】
+- 45-54岁：XX.X%（X,XXX人）- 【消费特征】
+- 55-64岁：XX.X%（X,XXX人）- 【消费特征】
+- 65岁+：XX.X%（X,XXX人）- 【消费特征】
+
+【分析每个年龄段对目标业态的意义，不少于300字】
+
+### 3.2 收入水平详细分析
+
+**收入数据（2026年）：**
+- 家庭收入中位数：$XX,XXX/年
+- 人均可支配收入：$XX,XXX/年
+- 收入增长率：+X.X%（vs 2025）
+
+**收入分层：**
+- <$25K：XX%（影响：...）
+- $25K-$50K：XX%（影响：...）
+- $50K-$75K：XX%（影响：...）
+- $75K-$100K：XX%（影响：...）
+- $100K-$150K：XX%（影响：...）
+- >$150K：XX%（影响：...）
+
+【详细分析收入分布对目标业态定价策略的启示，不少于250字】
+
+### 3.3 消费行为深度研究
+
+**2026年Q1消费数据：**
+- 月均家庭总支出：$X,XXX
+  - 食品饮料：$XXX（XX%）
+  - 零售购物：$XXX（XX%）
+  - 娱乐休闲：$XXX（XX%）
+  - 餐饮外出：$XXX（XX%）
+  - 个人服务：$XXX（XX%）
+
+**消费习惯分析：**
+- 外出就餐频率：X.X次/周
+- 线上消费占比：XX%
+- 品牌忠诚度：【高/中/低】
+- 价格敏感度：【高/中/低】
+- 消费偏好趋势：【详细分析】
+
+【深入分析消费习惯对业态的启示，不少于300字】
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## 第四章：商圈与人流量分析
+**（目标：700-800字）**
+
+### 4.1 商圈定位与特征
+
+**商圈类型：**【CBD/区域商业中心/社区型/旅游型/混合型】
+
+**商圈成熟度：**【成熟/发展中/新兴】
+
+【详细描述商圈历史、发展阶段、未来规划，不少于200字】
+
+### 4.2 人流量详细数据
+
+**日均人流统计：**
+- 工作日平均：XX,XXX人/天
+- 周末平均：XX,XXX人/天
+- 节假日平均：XX,XXX人/天
+
+**时段分布（工作日）：**
+- 早高峰（7-9点）：XX%
+- 上午（9-12点）：XX%
+- 午间（12-14点）：XX%
+- 下午（14-17点）：XX%
+- 晚高峰（17-20点）：XX%
+- 夜间（20-22点）：XX%
+
+【分析人流特征对营业时间、人员配置的指导意义，不少于200字】
+
+### 4.3 交通与可达性
+
+【详细分析交通便利度、停车设施、公共交通，不少于150字】
+
+### 4.4 周边配套
+
+【详细列举商场、学校、住宅、办公楼等配套，不少于150字】
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## 第五章：竞争环境深度分析
+**（目标：1200-1500字）**
+
+### 5.1 竞争格局总览
+
+**市场饱和度分析：**
+- 半径1公里内同类企业：XX家
+- 市场饱和度：【低/中/高】
+- 竞争强度：【弱/中/强】
+
+【使用上面提供的Google Maps真实数据】
+
+### 5.2 主要竞争者逐一深度分析
+
+【针对每个主要竞争者做详细SWOT分析，每个不少于200字】
+
+**竞争者 #1：【名称】**
+
+**基本信息：**
+- 位置距离：X.X公里
+- 评分：⭐X.X/5（XXX条评价）
+- 估算日客流：XXX人
+- 经营时间：X年
+
+**SWOT分析：**
+
+**优势（Strengths）：**
+1. ...
+2. ...
+3. ...
+
+**劣势（Weaknesses）：**
+1. ...
+2. ...
+3. ...
+
+**机会（Opportunities）：**
+1. ...
+2. ...
+
+**威胁（Threats）：**
+1. ...
+2. ...
+
+**对本项目的威胁等级：**【高/中/低】
+
+【对其他主要竞争者进行同样详细的分析】
+
+### 5.3 差异化竞争策略
+
+【提供3-5个具体的差异化策略，每个策略详细阐述，不少于300字】
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## 第六章：成本与投资分析
+**（目标：800-1000字，2026年价格）**
+
+### 6.1 初始投资明细
+
+**租金相关：**
+- 月租金：$XX,XXX
+- 押金（3个月）：$XX,XXX
+- 首月租金：$XX,XXX
+- 中介费：$XX,XXX
+- 小计：$XXX,XXX
+
+**装修成本：**
+- 基础装修：$XXX,XXX（明细：...）
+- 软装配饰：$XX,XXX
+- 招牌标识：$X,XXX
+- 小计：$XXX,XXX
+
+**设备采购：**
+【详细列举每项设备及价格】
+- 小计：$XX,XXX
+
+**其他费用：**
+【详细列举】
+- 小计：$XX,XXX
+
+**总初始投资：$XXX,XXX**
+
+### 6.2 月度运营成本
+
+【详细列举每项固定和变动成本】
+
+**月度总成本：$XX,XXX**
+
+### 6.3 盈亏平衡分析
+
+【计算盈亏平衡点，提供详细公式和过程】
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## 第七章：财务预测与投资回报
+**（目标：1200-1500字）**
+
+### 7.1 收入预测模型
+
+【详细说明收入预测的假设和方法】
+
+### 7.2 2026年财务预测（首年）
+
+**月度详细预测：**
+
+**Q1（开业期）：**
+- 第1个月：收入$XX,XXX，成本$XX,XXX，净利润$(XX,XXX)
+- 第2个月：收入$XX,XXX，成本$XX,XXX，净利润$(XX,XXX)
+- 第3个月：收入$XX,XXX，成本$XX,XXX，净利润$X,XXX
+
+**Q2（增长期）：**
+【逐月详细预测】
+
+**Q3-Q4：**
+【逐月详细预测】
+
+**2026年度汇总：**
+- 总收入：$XXX,XXX
+- 总成本：$XXX,XXX
+- 毛利润：$XX,XXX
+- 净利润：$XX,XXX
+- ROI：XX.X%
+
+### 7.3 2027-2028年预测
+
+【提供详细的两年预测】
+
+### 7.4 敏感性分析
+
+**保守情景（收入-20%）：**
+【详细分析】
+
+**基准情景：**
+【详细分析】
+
+**乐观情景（收入+20%）：**
+【详细分析】
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## 第八章：最适业态TOP 5排名
+**（目标：800-1000字）**
+
+【基于区域特性，深度分析5种最适合的业态】
+
+**第1名：【业态名称】- 成功概率XX%**
+
+**市场需求分析：**
+【详细分析，不少于150字】
+
+**竞争优势分析：**
+【详细分析，不少于150字】
+
+**投资回报预测：**
+【详细数据】
+
+**风险评估：**
+【详细分析】
+
+【对其他4个业态进行同样详细的分析】
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## 第九章：风险评估与缓解
+**（目标：600-800字）**
+
+### 9.1 主要风险识别
+
+【识别5-7个主要风险，每个详细分析】
+
+**风险1：【名称】**
+- 发生概率：【高/中/低】
+- 影响程度：【严重/中等/轻微】
+- 详细描述：...
+- 缓解措施：...
+
+【其他风险同样详细分析】
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## 第十章：行动建议与实施计划
+**（目标：500-600字）**
+
+### 10.1 90天详细行动计划
+
+**第1-30天（筹备期）：**
+Week 1: 【具体任务】
+Week 2: 【具体任务】
+Week 3: 【具体任务】
+Week 4: 【具体任务】
+
+**第31-60天（装修期）：**
+【详细任务分解】
+
+**第61-90天（开业期）：**
+【详细任务分解】
+
+### 10.2 关键成功因素
+
+【列出7-10个关键成功因素，每个详细解释】
+
+### 10.3 最终建议
+
+【给出明确、可执行的最终建议】
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+**报告结束**
+
+**免责声明：**
+本报告由PropertyIQ AI系统生成，基于2026年第一季度公开数据、Google Maps实时数据和AI智能分析。报告中的经济预测、财务模型和市场分析仅供参考，不构成投资建议。实际投资决策前，请进行实地考察并咨询专业顾问。PropertyIQ不对因使用本报告而产生的任何损失承担责任。
+
+**数据来源说明：**
+- 竞争数据：Google Maps API实时获取
+- 经济数据：基于公开数据和AI分析预测
+- 财务预测：基于行业标准和AI模型计算
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+**总字数：5500-6500字 | 页数：20-25页**
+
+**重要：每个章节都必须详细展开！不要简略！这是客户花$29.99买的专业报告！**` :
+`You are a McKinsey-level commercial real estate consultant. Client paid $29.99 and expects exceptional value.
+
+Location: ${location.address}
+Business: ${understanding.business || 'commercial'}
+Date: ${currentDate} (March 6, 2026)
+${nearbyContext}
+
+Generate a 20-25 page professional report (5500-6500 words).
+
+Include: Executive Summary (with scoring), Regional Economics (2026 Q1 data), Demographics & Consumer Power, Traffic Analysis, Competition Analysis (detailed SWOT for each competitor using real Google Maps data above), Cost Analysis (2026 prices), Financial Projections (2026-2028 monthly breakdown), Top 5 Business Types, Risk Assessment, Action Plan.
+
+Each section must be fully developed with specific numbers and deep analysis. This is a premium paid report!`;
+
+    console.log('🤖 Generating premium report...');
+    
+    const message = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 16000,
+      temperature: 0.7,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const report = message.content[0].text || 'Generation error';
+    console.log(`✅ Generated: ${report.length} chars`);
+    
+    const reportId = `PQ-${type.toUpperCase()}-${Date.now()}`;
+    const reportData = {
+      reportId,
+      address: location.address,
+      location: { lat: location.lat, lng: location.lng },
+      language,
+      date: currentDate,
+      type
+    };
+
+    // ✅ 异步发送邮件（不阻塞响应）
+    if (email && email.includes('@') && email.length > 5) {
+      console.log('📧 Sending email asynchronously...');
+      sendReportEmail(email, reportData, report).catch(err => {
+        console.error('❌ Email error:', err);
+      });
+    }
+
+    // ✅ 立刻返回报告给前端
+    res.json({
+      success: true,
+      report,
+      location: { lat: location.lat, lng: location.lng },
+      address: location.address,
+      language,
+      date: currentDate,
+      reportId,
+      emailSent: email && email.includes('@') ? 'sending' : 'no_email'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/test', (req, res) => {
+  res.json({ 
+    status: 'running', 
+    version: 'PROFESSIONAL v2.0', 
+    features: ['async-email', 'premium-reports', '20-25-pages'],
+    domain: 'propertyiq.space',
+    timestamp: new Date().toISOString() 
+  });
+});
+
+const PORT = process.env.PORT || 5002;
+app.listen(PORT, () => console.log(`✅ PropertyIQ PROFESSIONAL - Port ${PORT}`));
