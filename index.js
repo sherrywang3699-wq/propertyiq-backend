@@ -1,59 +1,67 @@
-require('dotenv').config();
+
+cd ~/Desktop/propertyiq-ai/backend
+
+# 备份当前版本
+cp index.js index.js.backup2
+
+# 创建完整的后端（包含Stripe集成）
+cat > index.js << 'ENDFILE'
 const express = require('express');
 const cors = require('cors');
-const Anthropic = require('@anthropic-ai/sdk');
-const PDFDocument = require('pdfkit');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const Stripe = require('stripe');
+const axios = require('axios');
+const Anthropic = require('@anthropic-ai/sdk').default;
+const { Resend } = require('resend');
+require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 5002;
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 app.use(cors());
 app.use(express.json());
 
-const API_KEY = process.env.ANTHROPIC_API_KEY;
-const anthropic = new Anthropic({ apiKey: API_KEY });
-
-console.log('🚀 PropertyIQ Backend Starting...');
-console.log('API Key:', API_KEY ? 'OK ✅' : 'MISSING ❌');
-console.log('Stripe Key:', process.env.STRIPE_SECRET_KEY ? 'OK ✅' : 'MISSING ❌');
-console.log('Port:', PORT);
+const PRICING = {
+  residential: { USD: 999, display: '$9.99' },
+  commercial: { USD: 2999, display: '$29.99' }
+};
 
 app.post('/api/create-checkout', async (req, res) => {
   try {
-    const { reportType, query, amount, promoCode } = req.body;
+    const { type, address, email, promoCode } = req.body;
     
-    let finalAmount = amount;
-    if (promoCode === 'TEST2025' || promoCode === 'ADMIN') {
-      finalAmount = 0;
-    }
-    
-    if (finalAmount === 0) {
-      return res.json({ 
-        url: `https://propertyiq-ai.vercel.app/generate?query=${encodeURIComponent(query)}&type=${reportType}&test=true`
-      });
-    }
-    
-    const session = await stripe.checkout.sessions.create({
+    const sessionConfig = {
       payment_method_types: ['card'],
+      customer_email: email || undefined,
       line_items: [{
         price_data: {
           currency: 'usd',
-          product_data: {
-            name: reportType === 'property' ? 'Property Analysis Report' : 'Business Location Analysis',
-            description: `AI-powered analysis for: ${query}`
+          product_data: { 
+            name: `PropertyIQ ${type} Analysis`, 
+            description: address 
           },
-          unit_amount: finalAmount
+          unit_amount: PRICING[type].USD,
         },
-        quantity: 1
+        quantity: 1,
       }],
       mode: 'payment',
-      success_url: `https://propertyiq-ai.vercel.app/success?session_id={CHECKOUT_SESSION_ID}&query=${encodeURIComponent(query)}&type=${reportType}`,
-      cancel_url: 'https://propertyiq-ai.vercel.app?canceled=true',
-      metadata: { query, reportType }
-    });
-    
+      success_url: `https://propertyiq-ai.vercel.app/?success=true&session_id={CHECKOUT_SESSION_ID}&address=${encodeURIComponent(address)}&type=${type}&email=${encodeURIComponent(email || '')}`,
+      cancel_url: `https://propertyiq-ai.vercel.app/`,
+      metadata: { address, type, email: email || 'none', promoCode: promoCode || 'none' }
+    };
+
+    // 检查promo code
+    if (promoCode && (promoCode.toUpperCase() === 'TEST2025' || promoCode.toUpperCase() === 'ADMIN')) {
+      // 免费测试
+      return res.json({ 
+        url: `https://propertyiq-ai.vercel.app/?success=true&test=true&address=${encodeURIComponent(address)}&type=${type}&email=${encodeURIComponent(email || '')}`
+      });
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionConfig);
     res.json({ url: session.url });
+    
   } catch (error) {
     console.error('Stripe error:', error);
     res.status(500).json({ error: error.message });
@@ -76,6 +84,7 @@ app.post('/api/generate', async (req, res) => {
     });
     
     const reportText = message.content[0].text;
+    const PDFDocument = require('pdfkit');
     const doc = new PDFDocument({ margin: 50 });
     const chunks = [];
     
@@ -104,11 +113,15 @@ app.post('/api/generate', async (req, res) => {
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
-    api_key_present: !!API_KEY, 
+    api_key_present: !!process.env.ANTHROPIC_API_KEY, 
     stripe_key_present: !!process.env.STRIPE_SECRET_KEY 
   });
 });
 
+const PORT = process.env.PORT || 5002;
 app.listen(PORT, () => {
   console.log(`\n✅ Server running on port ${PORT}\n`);
 });
+ENDFILE
+
+echo "✅ 后端代码已恢复！"
