@@ -26,7 +26,7 @@ app.post('/api/create-checkout', async (req, res) => {
     
     if (promoCode && (promoCode.toUpperCase() === 'TEST2025' || promoCode.toUpperCase() === 'ADMIN')) {
       return res.json({ 
-        url: `https://propertyiq-ai.vercel.app/?success=true&test=true&address=${encodeURIComponent(address)}&type=${type}&email=${encodeURIComponent(email || '')}`
+        url: `https://propertyiq-ai.vercel.app//success?address=...&test=true${encodeURIComponent(address)}&type=${type}&email=${encodeURIComponent(email || '')}`
       });
     }
 
