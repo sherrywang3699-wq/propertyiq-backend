@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
-const PORT = 5002;
+const PORT = process.env.PORT || 5002; // 🔥 使用Railway的PORT
 
 app.use(cors());
 app.use(express.json());
@@ -21,6 +21,7 @@ const anthropic = new Anthropic({
 
 console.log('🚀 PropertyIQ Backend Starting...');
 console.log('API Key:', process.env.ANTHROPIC_API_KEY ? 'OK ✅' : 'MISSING ❌');
+console.log('Port:', PORT);
 
 app.post('/api/generate', async (req, res) => {
   const startTime = Date.now();
@@ -29,7 +30,6 @@ app.post('/api/generate', async (req, res) => {
     const { query } = req.body;
     console.log('\n📝 New request:', query);
     
-    // Generate report
     console.log('Calling Claude API...');
     const message = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
@@ -45,7 +45,6 @@ Include: location overview, market assessment, competition, financial outlook, r
     const reportText = message.content[0].text;
     console.log('✅ Report generated:', reportText.length, 'chars');
     
-    // Create PDF
     console.log('Creating PDF...');
     const filename = `Report_${Date.now()}.pdf`;
     const filepath = path.join('pdfs', filename);
@@ -96,6 +95,6 @@ app.get('/health', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`\n✅ Server running on http://localhost:${PORT}`);
-  console.log('📍 Test: curl http://localhost:5002/health\n');
+  console.log(`\n✅ Server running on port ${PORT}`);
+  console.log('📍 Ready to receive requests\n');
 });
