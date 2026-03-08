@@ -1,26 +1,19 @@
-
-cd ~/Desktop/propertyiq-ai/backend
-
-# 备份当前版本
-cp index.js index.js.backup2
-
-# 创建完整的后端（包含Stripe集成）
-cat > index.js << 'ENDFILE'
 const express = require('express');
 const cors = require('cors');
 const Stripe = require('stripe');
-const axios = require('axios');
 const Anthropic = require('@anthropic-ai/sdk').default;
-const { Resend } = require('resend');
 require('dotenv').config();
 
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const resend = new Resend(process.env.RESEND_API_KEY);
 
 app.use(cors());
 app.use(express.json());
+
+console.log('🚀 PropertyIQ Backend Starting...');
+console.log('Stripe Key:', process.env.STRIPE_SECRET_KEY ? 'OK ✅' : 'MISSING ❌');
+console.log('Anthropic Key:', process.env.ANTHROPIC_API_KEY ? 'OK ✅' : 'MISSING ❌');
 
 const PRICING = {
   residential: { USD: 999, display: '$9.99' },
@@ -31,14 +24,20 @@ app.post('/api/create-checkout', async (req, res) => {
   try {
     const { type, address, email, promoCode } = req.body;
     
-    const sessionConfig = {
+    if (promoCode && (promoCode.toUpperCase() === 'TEST2025' || promoCode.toUpperCase() === 'ADMIN')) {
+      return res.json({ 
+        url: `https://propertyiq-ai.vercel.app/?success=true&test=true&address=${encodeURIComponent(address)}&type=${type}&email=${encodeURIComponent(email || '')}`
+      });
+    }
+
+    const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       customer_email: email || undefined,
       line_items: [{
         price_data: {
           currency: 'usd',
           product_data: { 
-            name: `PropertyIQ ${type} Analysis`, 
+            name: `PropertyIQ ${type === 'residential' ? 'Property' : 'Business'} Analysis`, 
             description: address 
           },
           unit_amount: PRICING[type].USD,
@@ -46,22 +45,12 @@ app.post('/api/create-checkout', async (req, res) => {
         quantity: 1,
       }],
       mode: 'payment',
-      success_url: `https://propertyiq-ai.vercel.app/?success=true&session_id={CHECKOUT_SESSION_ID}&address=${encodeURIComponent(address)}&type=${type}&email=${encodeURIComponent(email || '')}`,
+      success_url: `https://propertyiq-ai.vercel.app/?success=true&session_id={CHECKOUT_SESSION_ID}&address=${encodeURIComponent(address)}&type=${type}`,
       cancel_url: `https://propertyiq-ai.vercel.app/`,
-      metadata: { address, type, email: email || 'none', promoCode: promoCode || 'none' }
-    };
-
-    // 检查promo code
-    if (promoCode && (promoCode.toUpperCase() === 'TEST2025' || promoCode.toUpperCase() === 'ADMIN')) {
-      // 免费测试
-      return res.json({ 
-        url: `https://propertyiq-ai.vercel.app/?success=true&test=true&address=${encodeURIComponent(address)}&type=${type}&email=${encodeURIComponent(email || '')}`
-      });
-    }
-
-    const session = await stripe.checkout.sessions.create(sessionConfig);
-    res.json({ url: session.url });
+      metadata: { address, type }
+    });
     
+    res.json({ url: session.url });
   } catch (error) {
     console.error('Stripe error:', error);
     res.status(500).json({ error: error.message });
@@ -69,10 +58,9 @@ app.post('/api/create-checkout', async (req, res) => {
 });
 
 app.post('/api/generate', async (req, res) => {
-  const startTime = Date.now();
   try {
     const { query } = req.body;
-    console.log('\n📝 New request:', query);
+    console.log('📝 Generating report for:', query);
     
     const message = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
@@ -92,7 +80,7 @@ app.post('/api/generate', async (req, res) => {
     doc.on('end', () => {
       const pdfBuffer = Buffer.concat(chunks);
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename="PropertyIQ_Report_${Date.now()}.pdf"`);
+      res.setHeader('Content-Disposition', `attachment; filename="PropertyIQ_${Date.now()}.pdf"`);
       res.send(pdfBuffer);
     });
     
@@ -105,7 +93,7 @@ app.post('/api/generate', async (req, res) => {
     doc.fontSize(10).font('Helvetica').text(reportText, { align: 'justify' });
     doc.end();
   } catch (error) {
-    console.error('❌ Error:', error.message);
+    console.error('Error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -120,8 +108,5 @@ app.get('/health', (req, res) => {
 
 const PORT = process.env.PORT || 5002;
 app.listen(PORT, () => {
-  console.log(`\n✅ Server running on port ${PORT}\n`);
+  console.log(`✅ Server running on port ${PORT}`);
 });
-ENDFILE
-
-echo "✅ 后端代码已恢复！"
