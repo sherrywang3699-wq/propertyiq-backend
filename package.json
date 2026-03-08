@@ -1,0 +1,23 @@
+{
+  "name": "propertyiq-backend",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "dev": "node index.js",
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "@googlemaps/google-maps-services-js": "^3.3.42",
+    "@mapbox/mapbox-sdk": "^0.16.2",
+    "@sparticuz/chromium": "^143.0.4",
+    "axios": "^1.13.6",
+    "cors": "^2.8.6",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.1",
+    "node-fetch": "^3.3.2",
+    "pdfkit": "^0.17.2",
+    "puppeteer-core": "^24.38.0",
+    "stripe": "^14.10.0"
+  }
+}
