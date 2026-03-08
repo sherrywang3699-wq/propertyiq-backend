@@ -24,11 +24,12 @@ app.post('/api/create-checkout', async (req, res) => {
   try {
     const { type, address, email, promoCode } = req.body;
     
-    if (promoCode && (promoCode.toUpperCase() === 'TEST2025' || promoCode.toUpperCase() === 'ADMIN')) {
-      return res.json({ 
-        url: `https://propertyiq-ai.vercel.app//success?address=...&test=true${encodeURIComponent(address)}&type=${type}&email=${encodeURIComponent(email || '')}`
-      });
-    }
+   if (promoCode && (promoCode.toUpperCase() === 'TEST2025' || promoCode.toUpperCase() === 'ADMIN')) {
+  return res.json({ 
+    url: `https://propertyiq-ai.vercel.app/success?address=${encodeURIComponent(address)}&type=${type}&test=true`
+  });
+}
+
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
