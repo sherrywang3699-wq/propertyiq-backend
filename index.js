@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const Anthropic = require('@anthropic-ai/sdk');
 const PDFDocument = require('pdfkit');
-const path = require('path');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 const PORT = process.env.PORT || 5002;
@@ -11,23 +11,68 @@ const PORT = process.env.PORT || 5002;
 app.use(cors());
 app.use(express.json());
 
-const API_KEY = process.env.ANTHROPIC_API_KEY || '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';
+const API_KEY = process.env.ANTHROPIC_API_KEY;
 const anthropic = new Anthropic({ apiKey: API_KEY });
 
 console.log('🚀 PropertyIQ Backend Starting...');
 console.log('API Key:', API_KEY ? 'OK ✅' : 'MISSING ❌');
+console.log('Stripe Key:', process.env.STRIPE_SECRET_KEY ? 'OK ✅' : 'MISSING ❌');
 console.log('Port:', PORT);
 
-// 🔥 直接生成并返回PDF（不保存到磁盘）
+// Stripe Checkout Session
+app.post('/api/create-checkout', async (req, res) => {
+  try {
+    const { reportType, query, amount, promoCode } = req.body;
+    
+    // 检查promo code
+    let finalAmount = amount;
+    if (promoCode === 'TEST2025' || promoCode === 'ADMIN') {
+      finalAmount = 0; // 免费测试
+    }
+    
+    if (finalAmount === 0) {
+      // 免费测试，直接生成报告
+      return res.json({ 
+        url: `https://propertyiq-ai.vercel.app/generate?query=${encodeURIComponent(query)}&type=${reportType}&test=true`
+      });
+    }
+    
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          product_data: {
+            name: reportType === 'property' ? 'Property Analysis Report' : 'Business Location Analysis',
+            description: `AI-powered analysis for: ${query}`
+          },
+          unit_amount: finalAmount
+        },
+        quantity: 1
+      }],
+      mode: 'payment',
+      success_url: `https://propertyiq-ai.vercel.app/success?session_id={CHECKOUT_SESSION_ID}&query=${encodeURIComponent(query)}&type=${reportType}`,
+      cancel_url: 'https://propertyiq-ai.vercel.app?canceled=true',
+      metadata: {
+        query,
+        reportType
+      }
+    });
+    
+    res.json({ url: session.url });
+  } catch (error) {
+    console.error('Stripe error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Generate PDF Report
 app.post('/api/generate', async (req, res) => {
   const startTime = Date.now();
-  
   try {
     const { query } = req.body;
     console.log('\n📝 New request:', query);
     
-    // Generate report
-    console.log('Calling Claude API...');
     const message = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 2048,
@@ -38,31 +83,22 @@ app.post('/api/generate', async (req, res) => {
     });
     
     const reportText = message.content[0].text;
-    console.log('✅ Report generated:', reportText.length, 'chars');
+    console.log('✅ Report generated');
     
-    // Create PDF in memory
-    console.log('Creating PDF in memory...');
     const doc = new PDFDocument({ margin: 50 });
     const chunks = [];
     
-    // Collect PDF chunks
     doc.on('data', chunk => chunks.push(chunk));
-    
     doc.on('end', () => {
       const pdfBuffer = Buffer.concat(chunks);
       const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.log('✅ PDF created');
       
-      console.log('✅ PDF created in memory');
-      console.log('⏱️  Total time:', totalTime + 's\n');
-      
-      // Send PDF directly
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename="PropertyIQ_Report_${Date.now()}.pdf"`);
-      res.setHeader('Content-Length', pdfBuffer.length);
       res.send(pdfBuffer);
     });
     
-    // Write content
     doc.fontSize(20).font('Helvetica-Bold').text('PropertyIQ Analysis', { align: 'center' });
     doc.moveDown();
     doc.fontSize(12).font('Helvetica').text(query, { align: 'center' });
@@ -70,9 +106,7 @@ app.post('/api/generate', async (req, res) => {
     doc.fontSize(10).text(new Date().toLocaleDateString(), { align: 'center' });
     doc.moveDown(2);
     doc.fontSize(10).font('Helvetica').text(reportText, { align: 'justify' });
-    
     doc.end();
-    
   } catch (error) {
     console.error('❌ Error:', error.message);
     res.status(500).json({ error: error.message });
@@ -80,7 +114,7 @@ app.post('/api/generate', async (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', api_key_present: !!API_KEY });
+  res.json({ status: 'ok', api_key_present: !!API_KEY, stripe_key_present: !!process.env.STRIPE_SECRET_KEY });
 });
 
 app.listen(PORT, () => {
